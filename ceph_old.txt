@@ -1,0 +1,443 @@
+CEPH
+***ceph功能
+**块
+**文件系统mds
+**对象存储
+
+***ceph组件
+**OSDS
+*存储设备(可实现文件共享)
+**Monitors
+*集群监控组件
+**MDSs
+*存放文件系统的元数据(对象存储和块存储不需要该组件)
+**Client
+*ceph客户端
+
+***ceph实验环境
+**主机配置
+主机名		IP地址(eth0)		角色				功能
+Client		192.168.5.3		客户端虚拟机		访问,提供NTP同步服务
+agent		192.168.5.4		存储集群虚拟机1	OSDS，Monitors
+user1		192.168.5.5		存储集群虚拟机2	OSDS，Monitors
+user2		192.168.5.6		存储集群虚拟机3	OSDS，Monitors
+[root@ansible|db1|db2|web1 ~]# vim /etc/hosts
+192.168.3.114   ansible
+192.168.3.157   web1
+192.168.3.159   db1
+192.168.3.116   db2
+*ansible配置文件复制到db1,db2,web1
+[root@ansible ~]# ansible all -m copy -a 'src=/etc/hosts dest=/etc/'
+#for循环方法实现一健同步(方法二)
+[root@ansible ~]# for i in 114 159 116 157
+> do
+> scp /etc/hosts 192.168.3.$i: /etc/
+> done
+**物理机配置yum源服务器(作用:为所有虚拟机提供yum服务)
+[root@yewei ~]# yum -y install vsftpd
+[root@yewei ~]# mkdir /var/ftp/ceph
+[root@yewei ~]# mount -o loop /iso/rhcs2.0-rhosp9-20161113-x86_64.iso /var/ftp/ceph/
+mount: /dev/loop1 写保护，将以只读方式挂载
+[root@yewei ~]# systemctl restart vsftpd
+[root@yewei ~]# cd /var/ftp/ceph/rhceph-2.0-rhel-7-x86_64/
+[root@yewei rhceph-2.0-rhel-7-x86_64]# ls
+EULA  GPL  MON  OSD  README  RPM-GPG-KEY-redhat-release  Tools  TRANS.TBL
+#注释：MON，OSD，Tools为Yum源
+**为所有虚拟机配置yum源(利用自动化工具ansible快速配置)[虚拟机ansible配置了ansible工具]
+[root@ansible ~]# vim /etc/yum.repos.d/ceph.repo 
+[mon]
+name=mon
+baseurl=ftp://192.168.3.254/ceph/rhceph-2.0-rhel-7-x86_64/MON
+gpgcheck=0
+[osd]
+name=osd
+baseurl=ftp://192.168.3.254/ceph/rhceph-2.0-rhel-7-x86_64/OSD
+gpgcheck=0
+[tools]
+name=tools
+baseurl=ftp://192.168.3.254/ceph/rhceph-2.0-rhel-7-x86_64/Tools
+gpgcheck=0
+[root@ansible ~]# yum clean all
+[root@ansible ~]# yum repolist
+已加载插件：fastestmirror
+Loading mirror speeds from cached hostfile
+源标识                              源名称                                 状态
+Centos_repo                         CentOS packet                          9,591
+Centos_soft                         CentOS pub                                12
+mon                                 mon                                       41
+osd                                 osd                                       28
+tools                               tools                                     33
+repolist: 9,705
+*ansible配置文件复制到db1,db2,web1
+[root@ansible ~]# ansible all -m copy -a 'src=/etc/yum.repos.d/ceph.repo dest=/etc/yum.repos.d/'
+[root@ansible ~]# ansible all -m shell -a 'yum clean all'
+[root@ansible ~]# ansible all -m shell -a 'yum repolist'
+#for循环方法实现一健同步(方法二)
+[root@ansible ~]# for i in 114 159 116 157
+> do
+> scp /etc/yum.repos.d/ceph.repo 192.168.3.$i: /etc/yum.repos.d/
+> done
+**配置SSH信任关系
+#注意:不能出现要求输入yes的情况，每台机器都要能登陆成功，包括本机
+*修改配置
+[root@ansible ~]# vim /etc/ssh/ssh_config 
+ 58 Host *
+ 59         GSSAPIAuthentication yes
+ 60         StrictHostKeyChecking no 
+[root@ansible ~]# cd /root/.ssh/
+[root@ansible ~]# ssh-keygen -t rsa -b 2048 -N ''
+#拷贝公钥给其它虚拟机，包括自身，这点尤为重要
+[root@ansible ~]# ssh-copy-id -i id_rsa.pub db1 | db2 | web1 | ansible
+#for循环实现公钥，私钥配对(方法二)
+[root@ansible ~]# for i in 114 159 116 157
+> do
+> ssh-copy-id -i id_rsa.pub 192.168.3.$i
+> done
+**物理机做NTP时间同步服务器
+#注释：出现端口号为123,即为NTP时间同步服务器设置成功
+[root@yewei ~]# ss -tuanpl | grep chrony
+udp    UNCONN     0      0      127.0.0.1:323                   *:*                   users:(("chronyd",pid=901,fd=1))
+udp    UNCONN     0      0       ::1:323                  :::*                   users:(("chronyd",pid=901,fd=2))
+[root@yewei ~]# vim /etc/chrony.conf
+# Allow NTP client access from local network.
+allow 192.168.3.0/24
+# Serve time even if not synchronized to a time source.
+local stratum 10
+[root@yewei ~]# systemctl restart chronyd
+[root@yewei ~]# ss -tuanpl | grep chrony
+udp    UNCONN     0      0         *:123                   *:*                   users:(("chronyd",pid=23961,fd=3))
+udp    UNCONN     0      0      127.0.0.1:323                   *:*                   users:(("chronyd",pid=23961,fd=1))
+udp    UNCONN     0      0       ::1:323                  :::*                   users:(("chronyd",pid=23961,fd=2))
+[root@yewei ~]# systemctl enable chronyd
+*虚拟机同步物理机的NTP服务
+[root@ansible ~]# vim /etc/chrony.conf
+#server 0.centos.pool.ntp.org iburst
+#server 1.centos.pool.ntp.org iburst
+#server 2.centos.pool.ntp.org iburst
+#server 3.centos.pool.ntp.org iburst
+server 192.168.3.254 iburst
+[root@ansible ~]# systemctl restart chronyd
+[root@ansible ~]# ss -tuanpl | grep chronyd
+udp    UNCONN     0      0      127.0.0.1:323                   *:*                   users:(("chronyd",pid=1425,fd=1))
+udp    UNCONN     0      0       ::1:323                  :::*                   users:(("chronyd",pid=1425,fd=2))
+[root@ansible ~]# systemctl enable chronyd
+[root@ansible test_ntp]# ansible all -m copy -a 'src=/etc/chrony.conf dest=/etc/'
+[root@ansible test_ntp]# ansible all -m service -a 'name=chronyd state=restarted'
+[root@ansible test_ntp]# ansible all -m shell -a 'systemctl enable chronyd'
+[root@ansible test_ntp]# ansible all -m shell -a 'chronyc sources -v'
+*清空防火墙规则
+[root@ansible test_ntp]# iptables -F
+[root@ansible test_ntp]# 
+[root@ansible test_ntp]# ansible all -m shell -a 'iptables -F'
+db2 | SUCCESS | rc=0 >>
+db1 | SUCCESS | rc=0 >>
+web1 | SUCCESS | rc=0 >>
+[root@ansible test_ntp]# 
+**物理机上为每个虚拟机准备3块磁盘，也可以使用命令添加
+ansible|db1|db2
+
+***部署集群服务器
+**安装部署工具ceph-deploy(安装密钥的虚拟机)
+*部署软件
+[root@ansible ~]# yum -y install ceph-deploy	//ceph-deploy为python写的脚本，批量部署
+[root@ansible ~]# ceph-deploy --help
+*创建目录
+[root@ansible ~]# mkdir ceph-cluster
+[root@ansible ~]# cd ceph-cluster/
+**部署ceph集群
+*创建ceph集群配置
+[root@ansible ceph-cluster]# ceph-deploy new ansible db1 db2
+*
+#yum install https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+**准备日志磁盘分区
+
+**创建OSD存储空间
+
+**查看ceph状态，验证
+
+
+
+
+
+***ansible+ceph
+**ceph实验环境
+配置环境:
+a.创建1台客户端虚拟机
+b.创建3台存储集群虚拟机
+c.配置主机名，IP地址，YUM源
+d.修改所有主机的主机名
+e.配置无密码SSH连接
+f.配置NTP时间同步
+g.创建虚拟机磁盘
+*主机配置
+主机名		IP地址(eth0)		角色				功能
+Client		192.168.5.3		客户端虚拟机		访问,提供NTP同步服务	eth1:192.168.3.3
+Agent		192.168.5.4		存储集群虚拟机1	OSDS，Monitors		eth1:192.168.3.4
+User1		192.168.5.5		存储集群虚拟机2	OSDS，Monitors		eth1:192.168.3.5
+User2		192.168.5.6		存储集群虚拟机3	OSDS，Monitors		eth1:192.168.3.6
+#eth1为后续Web服务做准备
+注释:
+1.利用backup.img后端盘制作虚拟机Agent,User1,User2的前端盘Agent.img,User1.img,User2.img，容量为50G
+2.分别配置两张网卡及其ip
+eg:以虚拟机Agent为例
+1>真机执行，config_clone.sh为自动克隆虚拟机脚本
+[root@yewei ~]# config_clone.sh Agent
+Formatting 'Agent.img', fmt=qcow2 size=53687091200 backing_file='backup.img' encryption=off cluster_size=65536 lazy_refcounts=off 
+定义域 Agent（从 /etc/libvirt/qemu/Agent.xml）
+[root@yewei ~]# virsh start Agent
+[root@yewei ~]# virsh console Agent
+2>虚拟机执行
+[root@backup ~]# hostnamectl set-hostname Agent
+[root@backup ~]# config_static_ip.sh eth0 5 4
+[root@backup ~]# config_static_ip.sh eth1 3 4
+[root@backup ~]# ifup eth0
+[root@backup ~]# ifup eth1
+3>关机，在虚拟系统管理器中添加eth1网卡
+4>重启，查看网卡信息
+[root@Agent ~]# ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN qlen 1
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP qlen 1000
+    link/ether 52:54:00:98:7d:56 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.5.4/24 brd 192.168.5.255 scope global eth0
+       valid_lft forever preferred_lft forever
+    inet6 fe80::5054:ff:fe98:7d56/64 scope link 
+       valid_lft forever preferred_lft forever
+3: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP qlen 1000
+    link/ether 52:54:00:b2:02:68 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.3.4/24 brd 192.168.3.255 scope global eth1
+       valid_lft forever preferred_lft forever
+    inet6 fe80::5054:ff:feb2:268/64 scope link 
+       valid_lft forever preferred_lft forever
+**agent虚拟机安装ansible软件
+*真机配置好网络yum源，给虚拟机提供软件包
+[root@yewei images]# cd /var/ftp/pub/
+[root@yewei images]# mkdir ansible
+[root@yuwei pub]# ls
+ansible-2.4.2.0-2.el7.noarch.rpm
+config_clone.sh
+configip.sh
+config_static_ip.sh
+python2-jmespath-0.9.0-3.el7.noarch.rpm
+python-httplib2-0.9.2-1.el7.noarch.rpm
+python-paramiko-2.1.1-4.el7.noarch.rpm
+python-passlib-1.6.5-2.el7.noarch.rpm
+sshpass-1.06-2.el7.x86_64.rpm
+*虚拟机配置yum源文件
+[root@agent ~]# vim /etc/yum.repos.d/createrepo.repo
+[Createrepo_Source]
+name=Createrepo_Packages
+baseurl=ftp://192.168.5.254/pub/aisible
+enabled=1
+gpgcheck=0
+注释:linux alias永久生效,步骤如下:
+1.配置文件
+[root@yewei ～]# vim /root/.bashrc
+#增加如下:
+alias ys='yum search'
+alias yi='yum -y install'
+alias yca="yum clean all"
+alias yr="yum repolist"
+2.启动生效
+[root@yewei ～]# source /root/.bashrc
+3.测试
+[root@yewei ～]# yi ansible
+**虚拟机配置/etc/hosts
+[root@agent ~]# vim /etc/hosts
+#添加如下内容
+192.168.5.3     Client
+192.168.5.4     Agent
+192.168.5.5     User1
+192.168.5.6     User2
+*把配置同步到其他虚拟机中
+[root@agent ~]# for i in 3 5 6; do scp /etc/hosts 192.168.5.$i:/etc/; done
+*测试ping情况
+[root@agent ~]# ping -c 2 User1
+PING User1 (192.168.5.5) 56(84) bytes of data.
+64 bytes from User1 (192.168.5.5): icmp_seq=1 ttl=64 time=0.246 ms
+*测试ansible版本信息
+[root@agent ~]# ansible --version
+ansible 2.4.2.0
+... ...
+**ansible工具配置
+*熟悉ansible配置文件
+[root@agent ~]# vim /etc/ansible/ansible.cfg
+ 14 inventory      = /etc/ansible/hosts	//取消注释，功能:主机分组列表
+ 61 host_key_checking = False			//取消注释,功能:第1次后取消yes输入，ansible不必等待
+*定义主机，分组
+[root@agent ~]# vim /etc/ansible/hosts
+[Client]	//组名称
+Client
+
+[User]
+User[1:2]
+*显示所有组的主机
+[root@agent ~]# ansible all --list-host
+ [WARNING]: Found both group and host with same name: Client
+
+  hosts (3):
+    Client
+    User1
+    User2
+**配置无密码SSH连接
+[root@agent ~]# cd /root/.ssh/
+[root@agent .ssh]# ssh-keygen -t rsa -b 2048 -N ''
+[root@agent .ssh]# ansible all -m authorized_key -a "user=root exclusive=true manage_dir=true key='$(</root/.ssh/id_rsa.pub)'" -k
+*给本身主机配置密钥
+[root@agent .ssh]# ssh-copy-id Agent
+*测试远程登陆
+[root@agent .ssh]# ssh Client
+Last login: Tue Jan 15 21:29:47 2019 from 192.168.5.4
+[root@client ~]# exit
+**配置NTP时间同步
+*真实物理机作为提供给其它虚拟机的NTP服务器
+[root@yewei ~]# vim /etc/chrony.conf
+  7 server ntp1.aliyun.com iburst
+ 27 allow 192.168.5.0/24
+ 30 local stratum 10
+[root@yewei ~]# systemctl restart chronyd
+[root@yewei ~]# ss -tuanpl | grep chronyd
+udp    UNCONN     0      0         *:123                   *:*                   users:(("chronyd",pid=10744,fd=3))
+udp    UNCONN     0      0      127.0.0.1:323                   *:*                   users:(("chronyd",pid=10744,fd=1))
+udp    UNCONN     0      0       ::1:323                  :::*                   users:(("chronyd",pid=10744,fd=2))
+[root@yewei ~]# systemctl enable chronyd
+*查看真实物理机时间服务参数状态
+[root@yewei ~]# chronyc sources -v
+*虚拟机Agent的NTP配置如下:
+[root@Agent ~]# vim /etc/chrony.conf
+#server 0.centos.pool.ntp.org iburst
+#server 1.centos.pool.ntp.org iburst
+#server 2.centos.pool.ntp.org iburst
+#server 3.centos.pool.ntp.org iburst
+server 192.168.5.254 iburst
+[root@Agent ~]# systemctl restart chronyd
+[root@Agent ~]# systemctl enable chronyd
+[root@yewei ~]# chronyc sources -v
+*Agent的时间服务配置利用自动化工具一键部署到其它虚拟机中
+[root@agent ~]# ansible all -m copy -a 'src=/etc/chrony.conf dest=/etc/'
+[root@agent ~]# ansible all -m service -a 'name=chronyd state=restarted'
+[root@agent ~]# ansible all -m shell -a 'systemctl enable chronyd'
+[root@agent ~]# ansible all -m shell -a 'chronyc sources -v'
+*如果有防火墙规则，需要晴空所有规则
+[root@agent ~]# iptables -F
+[root@agent ~]# ansible all -m shell -a 'iptables -F'
+ [WARNING]: Found both group and host with same name: Client
+
+User1 | SUCCESS | rc=0 >>
+
+
+Client | SUCCESS | rc=0 >>
+
+
+User2 | SUCCESS | rc=0 >>
+
+*创建虚拟机磁盘(Agent,User1,User2)
+物理机上为每个虚拟机准备3块磁盘(可以使用命令，也可以使用图形直接添加)
+[root@agent|user1|user2 ~]# lsblk
+NAME   MAJ:MIN RM SIZE RO TYPE MOUNTPOINT
+vda    253:0    0  50G  0 disk 
+└─vda1 253:1    0  50G  0 part /
+vdb    253:16   0  20G  0 disk 
+vdc    253:32   0  20G  0 disk 
+vdd    253:48   0  20G  0 disk 
+**真实机配置ceph的yum源提供虚拟机使用
+[root@yewei ~]# mount -t iso9660 -o ro,loop /var/lib/libvirt/images/iso/rhcs2.0-rhosp9-20161113-x86_64.iso /var/ftp/pub/ceph/
+[root@yewei ~]# ls /var/ftp/pub/ceph/
+rhceph-2.0-rhel-7-x86_64        rhscon-2.0-rhel-7-x86_64
+rhel-7-server-openstack-9-rpms
+[root@yewei ~]# mount -a
+[root@yewei ~]# vim /etc/fstab
+#增加如下
+/var/lib/libvirt/images/iso/rhcs2.0-rhosp9-20161113-x86_64.iso /var/ftp/pub/ceph iso9660 defaults 0 0
+[root@yewei ~]# vim /etc/yum.repos.d/ceph.repo
+[mon]
+name=mon
+baseurl=ftp://192.168.5.254/pub/ceph/rhceph-2.0-rhel-7-x86_64/MON
+gpgcheck=0
+[osd]
+name=osd
+baseurl=ftp://192.168.5.254/pub/ceph/rhceph-2.0-rhel-7-x86_64/OSD
+gpgcheck=0
+[tools]
+name=tools
+baseurl=ftp://192.168.5.254/pub/ceph/rhceph-2.0-rhel-7-x86_64/Tools
+gpgcheck=0
+[root@yewei ~]# yum clean all
+[root@yewei ~]# yum repolist
+*物理机的yum配置传输到虚拟机中
+[root@yewei ~]# for i in {3..6}; do scp /etc/yum.repos.d/ceph.repo 192.168.5.$i:/etc/yum.repos.d/; done
+*alias命令操作
+[root@yewei ~]# for i in {3..6}; do scp /root/.bashrc 192.168.5.$i:/root/; done
+*如下各虚拟中操作
+[root@xuniji ~]# source /root/.bashrc
+yca
+
+***部署ceph集群
+a.安装部署工具ceph-deploy
+b.创建ceph集群
+c.准备日至磁盘分区
+d.创建OSD存储空间
+e.查看ceph状态，验证
+**部署软件
+*在Agent安装部署工具
+[root@agent ~]# yi ceph-deploy
+*创建目录
+[root@agent ~]# mkdir ceph-cluster
+[root@agent ~]# cd ceph-cluster/
+
+Ceph搭建过程中遇到的各种问题
+https://blog.csdn.net/sinat_36023271/article/details/52402028
+rpm -ivh http://mirrors.sohu.com/fedora-epel/6/x86_64/epel-release-6-8.noarch.rpm
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
